@@ -22,6 +22,8 @@
 
 #include "lcmgen.h"
 
+static int USE_LSTRING_BYTE;
+
 // lua uses just 2 spaces per indent
 #define INDENT(n) (2*(n))
 
@@ -32,7 +34,7 @@
 
 #define err(...) fprintf (stderr, __VA_ARGS__)
 
-static void 
+static void
 mkdir_with_parents (const char *path, mode_t mode)
 {
 #ifdef WIN32
@@ -54,7 +56,7 @@ mkdir_with_parents (const char *path, mode_t mode)
 #endif
 }
 
-static char * 
+static char *
 build_filenamev (char **parts)
 {
     char **p = parts;
@@ -68,7 +70,7 @@ build_filenamev (char **parts)
     for (p = parts; *p; p++) {
         if (! strlen(*p)) continue;
         strncat(result, *p, total_len);
-        if (*(p+1)) 
+        if (*(p+1))
             strncat(result, G_DIR_SEPARATOR_S, total_len);
     }
     return result;
@@ -79,10 +81,10 @@ get_all_vals_helper (gpointer key, gpointer value, gpointer user_data)
 {
     GPtrArray *vals = (GPtrArray*) user_data;
 
-    g_ptr_array_add(vals, value);    
+    g_ptr_array_add(vals, value);
 }
 
-static GPtrArray * 
+static GPtrArray *
 _hash_table_get_vals (GHashTable *hash_table)
 {
     GPtrArray *vals = g_ptr_array_sized_new(g_hash_table_size(hash_table));
@@ -94,6 +96,7 @@ void setup_lua_options(getopt_t *gopt)
 {
     getopt_add_string(gopt, 0,   "lpath",     "",
             "Lua destination directory");
+    getopt_add_bool  (gopt, 0, "lbytestring",      0,     "Lua use lstring for byte arrays");
 }
 
 static int
@@ -117,7 +120,7 @@ nil_initializer_string(const lcm_typename_t *type)
 }
 
 static char
-_struct_format (lcm_member_t *lm) 
+_struct_format (lcm_member_t *lm)
 {
     const char *tn = lm->type->lctypename;
     if (!strcmp ("byte", tn)) return 'B';
@@ -163,7 +166,7 @@ escape_typename_to_variablename(const char * tn){
 }
 
 static void
-_emit_decode_one (const lcmgen_t *lcm, FILE *f, lcm_struct_t *ls, 
+_emit_decode_one (const lcmgen_t *lcm, FILE *f, lcm_struct_t *ls,
         lcm_member_t *lm, const char *accessor, int indent)
 {
 	// XXX probably needs some rework
@@ -209,7 +212,7 @@ _emit_decode_list(const lcmgen_t *lcm, FILE *f, lcm_struct_t *ls,
         const char *len, int fixed_len)
 {
     const char *tn = lm->type->lctypename;
-    if (!strcmp ("byte", tn) ||
+    if ((!strcmp ("byte", tn) && !USE_LSTRING_BYTE) ||
 		!strcmp ("int8_t", tn) ||
 		!strcmp ("boolean", tn) ||
 		!strcmp ("int16_t", tn) ||
@@ -219,7 +222,7 @@ _emit_decode_list(const lcmgen_t *lcm, FILE *f, lcm_struct_t *ls,
 		!strcmp ("double", tn)) {
         if(fixed_len) {
             emit (indent, "%s = {lcm._pack.unpack('>%s%c', data:read(%d))}",
-                    accessor, len, _struct_format(lm), 
+                    accessor, len, _struct_format(lm),
                     atoi(len) * _primitive_type_size(tn));
         } else {
             if(_primitive_type_size(tn) > 1) {
@@ -230,18 +233,33 @@ _emit_decode_list(const lcmgen_t *lcm, FILE *f, lcm_struct_t *ls,
                     accessor, _struct_format(lm), len, len);
             }
         }
-    } else {
+    }
+    else if (!strcmp ("byte", tn) && USE_LSTRING_BYTE){
+      if(fixed_len) {
+          emit (indent, "%s = data:read(%d)",
+                  accessor, atoi(len) * _primitive_type_size(tn));
+      } else {
+          if(_primitive_type_size(tn) > 1) {
+              emit (indent, "%s = data:read(obj.%s * %d)",
+                accessor, len, _primitive_type_size(tn));
+          } else {
+            emit (indent, "%s = data:read(obj.%s)",
+                  accessor, len);
+          }
+      }
+    }
+    else {
         assert(0);
     }
 }
 
 static void
-_flush_read_struct_fmt (const lcmgen_t *lcm, FILE *f, 
+_flush_read_struct_fmt (const lcmgen_t *lcm, FILE *f,
         GQueue *formats, GQueue *members)
 {
     int nfmts = g_queue_get_length(formats);
     assert (nfmts == g_queue_get_length (members));
-    if(nfmts == 0) 
+    if(nfmts == 0)
         return;
 
     emit_start(1, ""); // for indent
@@ -316,9 +334,9 @@ emit_lua_decode_one (const lcmgen_t *lcm, FILE *f, lcm_struct_t *ls)
                     lm->dimensions->len - 1);
             int last_dim_fixed_len = last_dim->mode == LCM_CONST;
 
-            if(lcm_is_primitive_type(lm->type->lctypename) && 
+            if(lcm_is_primitive_type(lm->type->lctypename) &&
                0 != strcmp(lm->type->lctypename, "string")) {
-                // member is a primitive non-string type.  Emit code to 
+                // member is a primitive non-string type.  Emit code to
                 // decode a full array in one call to struct.unpack
 
             	_emit_decode_list(lcm, f, ls, lm,
@@ -372,7 +390,7 @@ emit_lua_decode (const lcmgen_t *lcm, FILE *f, lcm_struct_t *ls)
 }
 
 static void
-_emit_encode_one (const lcmgen_t *lcm, FILE *f, lcm_struct_t *ls, 
+_emit_encode_one (const lcmgen_t *lcm, FILE *f, lcm_struct_t *ls,
         lcm_member_t *lm, const char *accessor, int indent)
 {
 	// XXX luaified, but might need some work
@@ -405,7 +423,7 @@ _emit_encode_one (const lcmgen_t *lcm, FILE *f, lcm_struct_t *ls,
 
 static void
 _emit_encode_list(const lcmgen_t *lcm, FILE *f, lcm_struct_t *ls,
-        lcm_member_t *lm, const char *accessor, int indent, 
+        lcm_member_t *lm, const char *accessor, int indent,
         const char *len, int fixed_len)
 {
     const char *tn = lm->type->lctypename;
@@ -496,7 +514,7 @@ emit_lua_encode_one (const lcmgen_t *lcm, FILE *f, lcm_struct_t *ls)
 
             int n;
             for (n=0; n<lm->dimensions->len - 1; n++) {
-                lcm_dimension_t *dim = 
+                lcm_dimension_t *dim =
                     (lcm_dimension_t*) g_ptr_array_index (lm->dimensions, n);
 
                 g_string_append_printf (accessor, "[i%d]", n);
@@ -512,7 +530,7 @@ emit_lua_encode_one (const lcmgen_t *lcm, FILE *f, lcm_struct_t *ls)
                     lm->dimensions->len - 1);
             int last_dim_fixed_len = last_dim->mode == LCM_CONST;
 
-            if(lcm_is_primitive_type(lm->type->lctypename) && 
+            if(lcm_is_primitive_type(lm->type->lctypename) &&
                0 != strcmp(lm->type->lctypename, "string")) {
 
                 _emit_encode_list(lcm, f, ls, lm,
@@ -755,6 +773,8 @@ emit_package (lcmgen_t *lcm, _package_contents_t *pc)
     char package_dir[PATH_MAX];
     char package_dir_prefix[PATH_MAX];
     int have_package = dirs[0] != NULL;
+
+    USE_LSTRING_BYTE = getopt_get_bool(lcm->gopt, "lbytestring");
 
     sprintf (package_dir_prefix, "%s%s", getopt_get_string(lcm->gopt, "lpath"),
             strlen(getopt_get_string(lcm->gopt, "lpath")) > 0 ?
@@ -1098,13 +1118,13 @@ emit_package (lcmgen_t *lcm, _package_contents_t *pc)
 // XXX step 1, but there's not much to see, then go to emit package
 int emit_lua(lcmgen_t *lcm)
 {
-    GHashTable *packages = g_hash_table_new_full (g_str_hash, 
+    GHashTable *packages = g_hash_table_new_full (g_str_hash,
             g_str_equal, NULL, (GDestroyNotify)_package_contents_free);
 
     // group the enums and structs by package
     for (unsigned int i = 0; i < lcm->enums->len; i++) {
         lcm_enum_t *le = (lcm_enum_t *) g_ptr_array_index(lcm->enums, i);
-        _package_contents_t *pc = (_package_contents_t *) g_hash_table_lookup (packages, 
+        _package_contents_t *pc = (_package_contents_t *) g_hash_table_lookup (packages,
                 le->enumname->package);
         if (!pc) {
             pc = _package_contents_new (le->enumname->package);
@@ -1115,7 +1135,7 @@ int emit_lua(lcmgen_t *lcm)
 
     for (unsigned int i = 0; i < lcm->structs->len; i++) {
         lcm_struct_t *ls = (lcm_struct_t *) g_ptr_array_index(lcm->structs, i);
-        _package_contents_t *pc = (_package_contents_t *) g_hash_table_lookup (packages, 
+        _package_contents_t *pc = (_package_contents_t *) g_hash_table_lookup (packages,
                 ls->structname->package);
         if (!pc) {
             pc = _package_contents_new (ls->structname->package);
@@ -1128,7 +1148,7 @@ int emit_lua(lcmgen_t *lcm)
 
     for (int i=0; i<vals->len; i++) {
         _package_contents_t *pc = (_package_contents_t *) g_ptr_array_index (vals, i);
-        int status = emit_package (lcm, pc); 
+        int status = emit_package (lcm, pc);
         if (0 != status) return status;
     }
 
